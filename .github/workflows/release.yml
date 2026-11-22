@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: resonexuz-linux-x86_64
+            sep: ":"
+          - os: windows-latest
+            artifact: resonexuz-windows-x86_64.exe
+            sep: ";"
+          - os: macos-latest
+            artifact: resonexuz-macos-arm64
+            sep: ":"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias del sistema (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libglfw3 libportaudio2
+      - name: Instalar dependencias y PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[audio]" pyinstaller
+      - name: Empaquetar binario portable
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --onefile --name resonexuz \
+            --add-data "resonexuz/shaders${{ matrix.sep }}resonexuz/shaders" \
+            --add-data "resonexuz/web${{ matrix.sep }}resonexuz/web" \
+            --add-data "resonexuz/config.toml${{ matrix.sep }}resonexuz" \
+            --add-data "resonexuz/shapes.json${{ matrix.sep }}resonexuz" \
+            --hidden-import glcontext \
+            --hidden-import moderngl \
+            --hidden-import soundcard \
+            scripts/entrypoint.py
+          mkdir -p release
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp dist/resonexuz.exe "release/${{ matrix.artifact }}"
+          else
+            cp dist/resonexuz "release/${{ matrix.artifact }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/${{ matrix.artifact }}
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

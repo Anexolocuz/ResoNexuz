@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resonexuz"
+version = "1.0.0"
+description = "Visualizador de audio estéreo en OpenGL con formas simétricas híbridas, ecos en crestas y mallas 3D estilo plexus"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "moderngl>=5.10",
+    "numpy>=1.26",
+    "glfw>=2.7",
+]
+
+[project.optional-dependencies]
+audio = ["soundcard>=0.4.3"]
+
+[project.scripts]
+resonexuz = "resonexuz.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["resonexuz*"]
+
+[tool.setuptools.package-data]
+resonexuz = ["shaders/*", "web/*", "config.toml", "shapes.json"]

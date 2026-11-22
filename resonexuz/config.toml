@@ -1,0 +1,33 @@
+# Configuración por defecto de ResoNexuz.
+
+[audio]
+sensitivity = 1.0
+gamma = 0.7
+silence_rms = 1e-4
+silence_seconds = 0.0
+stereo_separation = 1.0
+
+[peaks]
+primary_ratio = 1.32
+secondary_ratio = 1.45
+
+[color]
+harmony = "split_complementary"
+history_seconds = 5.0
+short_seconds = 20.0
+mode_weight = 1.0
+short_influence = 0.25
+tempo_influence = 0.36
+tone_influence = 0.16
+hue_smoothing = 0.035
+
+[visual]
+ring_size = 1.0
+ring_reactivity = 1.0
+particle_density = 1.0
+
+[display]
+monitor = 0
+
+[wallpaper]
+fps = 60

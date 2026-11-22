@@ -1,0 +1,30 @@
+services:
+  # Funciona en cualquier OS (Linux, Windows, macOS) para configurar formas y vista previa web
+  resonexuz-ui:
+    build: .
+    image: resonexuz:latest
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - resonexuz_config:/config
+    command: ["--ui", "--host", "0.0.0.0", "--port", "8765", "--no-browser"]
+
+  # Visualizador OpenGL en Linux con GPU (/dev/dri), Wayland/X11 y PipeWire/PulseAudio
+  resonexuz:
+    build: .
+    image: resonexuz:latest
+    profiles: ["desktop"]
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
+      - DISPLAY=${DISPLAY:-}
+      - XDG_RUNTIME_DIR=/tmp/runtime
+      - PULSE_SERVER=unix:/tmp/runtime/pulse/native
+    volumes:
+      - resonexuz_config:/config
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}:/tmp/runtime
+    command: ["--windowed"]
+
+volumes:
+  resonexuz_config:
