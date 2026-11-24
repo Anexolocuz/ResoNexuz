@@ -151,6 +151,9 @@ def try_run_wayland_wallpaper(cfg_path: Path | None = None, shapes_path: Path | 
             self._shapes_mtime = self._mtime(self.shapes_path)
             self.fps_override = fps
             self.fps = max(10, fps or int(self.cfg.get("wallpaper", {}).get("fps", 60)))
+            q = self.cfg.get("quality", {})
+            self.max_fps = int(q.get("max_fps", 60))
+            self.idle_fps = int(q.get("idle_fps", 15))
             self.seconds = seconds
             self.demo = demo
             self.snapshot = snapshot
@@ -241,6 +244,9 @@ def try_run_wayland_wallpaper(cfg_path: Path | None = None, shapes_path: Path | 
                 self.engine.update_config(self.cfg)
                 if self.fps_override is None:
                     self.fps = max(10, int(self.cfg.get("wallpaper", {}).get("fps", 60)))
+                q = self.cfg.get("quality", {})
+                self.max_fps = int(q.get("max_fps", 60))
+                self.idle_fps = int(q.get("idle_fps", 15))
                 self.cfg_gen += 1
 
             sm = self._mtime(self.shapes_path)
@@ -250,15 +256,22 @@ def try_run_wayland_wallpaper(cfg_path: Path | None = None, shapes_path: Path | 
                 self.shape_gen += 1
             return True
 
-        def _interval(self) -> int:
-            return max(8, int(1000 / self.fps))
+        def _interval(self, idle: float = 0.0) -> int:
+            active_fps = self.fps if self.fps_override is not None else (
+                min(self.fps, self.max_fps) if self.max_fps > 0 else self.fps
+            )
+            if idle > 0.92 and self.idle_fps > 0:
+                target_fps = min(active_fps, self.idle_fps)
+            else:
+                target_fps = active_fps
+            return max(8, int(1000 / max(1, target_fps)))
 
         def tick(self) -> bool:
             for win in list(self.windows.values()):
                 if win.get_realized() and win.area.get_realized():
                     win.area.queue_render()
             idle = self._frame.idle if self._frame is not None else 0.0
-            self._tick_timer_id = GLib.timeout_add(self._interval() * (3 if idle > 0.95 else 1), self.tick)
+            self._tick_timer_id = GLib.timeout_add(self._interval(idle), self.tick)
             return False
 
         def quit_all(self) -> bool:

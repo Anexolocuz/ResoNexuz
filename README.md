@@ -11,6 +11,7 @@ Visualizador de audio estéreo en tiempo real (OpenGL 3.3 / ModernGL) utilizable
   - **Dibujo simétrico libre:** lienzo interactivo con simetría bilateral automática y dos circunferencias guía (interior y exterior) procesadas mediante campo de distancia (SDF 2D).
 - **8 figuras 3D rotatorias estilo plexus:** **Esfera geodésica plexus**, **Átomo con electrones en órbita**, octaedro, cubo, pirámide, prisma hexagonal, toroide y extrusión de tu propio dibujo, con facetas translúcidas, aristas luminosas y nodos estrella.
 - **Ecos en crestas:** cada nivel puede ocultar su línea de eco en reposo y mostrarla únicamente cuando la onda se acerca al máximo configurable.
+- **Perfiles de calidad y rendimiento (`[quality]`):** 5 perfiles listos desde el configurador web (*Máxima*, *Alta*, *Equilibrada*, *Ligera* y *Ultra ahorro*) además de controles individuales para escala de resolución, constelación (completa, solo puntos o apagada), brillo/halos, ecos, facetas/aura 3D y límite de FPS activos y en reposo.
 - **Configurador web integrado (`--ui`):** interfaz visual en el navegador (PC, tableta o móvil en red local) con vista previa animada, lienzo de dibujo y recarga en caliente sin reiniciar.
 
 ## Compatibilidad por sistema operativo

@@ -50,13 +50,28 @@ class AudioEngine:
         self.fft_freqs = freqs
         edges = np.geomspace(F_MIN, F_MAX, N_BANDS + 1)
         self.band_freqs = np.sqrt(edges[:-1] * edges[1:])
-        self.bin_ranges: list[tuple[int, int] | None] = []
-        for i in range(N_BANDS):
-            idx = np.where((freqs >= edges[i]) & (freqs < edges[i + 1]))[0]
-            self.bin_ranges.append((int(idx[0]), int(idx[-1]) + 1) if len(idx) >= 2 else None)
         self.window = np.hanning(CHUNK).astype(np.float32)
         self.win_norm = float(self.window.sum() / 2.0)
         self.tilt = np.linspace(0.85, 2.4, N_BANDS, dtype=np.float32)
+
+        n_bins = len(freqs)
+        mat = np.zeros((N_BANDS, n_bins), dtype=np.float32)
+        self.bin_ranges: list[tuple[int, int] | None] = []
+        for i in range(N_BANDS):
+            idx = np.where((freqs >= edges[i]) & (freqs < edges[i + 1]))[0]
+            if len(idx) >= 2:
+                self.bin_ranges.append((int(idx[0]), int(idx[-1]) + 1))
+                mat[i, idx] = self.tilt[i] / len(idx)
+            else:
+                self.bin_ranges.append(None)
+                f_tgt = self.band_freqs[i]
+                j = max(0, min(int(np.searchsorted(freqs, f_tgt, side="right")) - 1, n_bins - 2))
+                denom = float(freqs[j + 1] - freqs[j])
+                alpha = max(0.0, min(1.0, float((f_tgt - freqs[j]) / denom) if denom > 0 else 0.0))
+                mat[i, j] += self.tilt[i] * (1.0 - alpha)
+                mat[i, j + 1] += self.tilt[i] * alpha
+        self._band_matrix = mat
+        self._zero_spec = np.zeros(N_BANDS, dtype=np.float32)
 
         self.dynamics = ColorDynamics(self.band_freqs, BLOCK_DT, cfg)
         self._lock = threading.Lock()
@@ -91,10 +106,7 @@ class AudioEngine:
 
     def _fft_bands(self, ch: np.ndarray) -> np.ndarray:
         mag = np.abs(np.fft.rfft(ch * self.window)) / self.win_norm
-        bands = np.empty(N_BANDS, dtype=np.float32)
-        for i, rng in enumerate(self.bin_ranges):
-            bands[i] = mag[rng[0]:rng[1]].mean() if rng else np.interp(self.band_freqs[i], self.fft_freqs, mag)
-        return bands * self.tilt
+        return self._band_matrix @ mag.astype(np.float32, copy=False)
 
     def process_block(self, samples: np.ndarray) -> None:
         samples = samples.astype(np.float32, copy=False)
@@ -112,8 +124,9 @@ class AudioEngine:
         rms_r = float(np.sqrt(np.mean(right * right)))
         rms = max(rms_l, rms_r, float(np.sqrt(np.mean(mono * mono))))
 
-        bands_l = self._fft_bands(left)
-        bands_r = self._fft_bands(right)
+        mag_lr = np.abs(np.fft.rfft(np.vstack((left, right)) * self.window, axis=1)) / self.win_norm
+        bands_lr = mag_lr.astype(np.float32, copy=False) @ self._band_matrix.T
+        bands_l, bands_r = bands_lr[0], bands_lr[1]
         frame_max = float(max(bands_l.max(), bands_r.max()))
         self._agc_max = max(frame_max, self._agc_max * 0.993, 0.015)
 

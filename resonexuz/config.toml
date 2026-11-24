@@ -31,3 +31,16 @@ monitor = 0
 
 [wallpaper]
 fps = 60
+
+[quality]
+preset = "high"
+render_scale = 1.0
+constellation = "full"
+glow = true
+dither = true
+echo_detail = true
+plexus_facets = true
+plexus_aura = true
+max_fps = 60
+idle_fps = 15
+

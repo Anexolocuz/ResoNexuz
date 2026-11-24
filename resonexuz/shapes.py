@@ -344,43 +344,99 @@ def _atom_mesh(t: float) -> tuple[np.ndarray, list[tuple[int, int]], list[tuple[
     return np.vstack(verts_list), edges, tris, np.asarray(electrons, dtype=np.float64)
 
 
-def build_3d_mesh(kind: str, level: dict[str, Any], guide_inner: float, guide_outer: float, t: float = 0.0
-                  ) -> tuple[np.ndarray, list[tuple[int, int]], list[tuple[int, int, int]], np.ndarray]:
+def _make_base_aura() -> np.ndarray:
     rng = np.random.default_rng(19)
     dirs = rng.normal(size=(22, 3))
     dirs /= np.maximum(np.linalg.norm(dirs, axis=1, keepdims=True), 1e-6)
-    aura = dirs * rng.uniform(0.76, 0.94, size=(22, 1))
+    return dirs * rng.uniform(0.76, 0.94, size=(22, 1))
+
+
+_BASE_AURA = _make_base_aura()
+_STATIC_3D_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+_CUSTOM_3D_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+_ATOM_TILTS = ((0.35, 0.0, 0.0), (0.35, 0.0, math.pi / 3.0), (0.35, 0.0, -math.pi / 3.0))
+
+
+def _atom_static_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray]]:
+    cached = _STATIC_3D_CACHE.get("_atom_full")
+    if cached is not None:
+        return cached[0], cached[1], cached[2], _STATIC_3D_CACHE["_atom_mats"]  # type: ignore[return-value]
+
+    nuc_v = np.array([[0, -1, 0], [0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]], dtype=np.float64) * 0.16
+    edges: list[tuple[int, int]] = [
+        (0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (4, 3), (3, 5), (5, 2)
+    ]
+    tris: list[tuple[int, int, int]] = [
+        (1, 4, 2), (1, 2, 5), (1, 5, 3), (1, 3, 4),
+        (0, 2, 4), (0, 5, 2), (0, 3, 5), (0, 4, 3),
+    ]
+    verts_list = [nuc_v]
+    mats: list[np.ndarray] = []
+    ring_n = 28
+    ring_r = 0.72
+    a = np.linspace(0, 2 * math.pi, ring_n, endpoint=False)
+    base_ring = np.column_stack([np.cos(a) * ring_r, np.sin(a) * ring_r * 0.44, np.zeros(ring_n)])
+    for tx, _ty, tz in _ATOM_TILTS:
+        base_idx = sum(len(v) for v in verts_list)
+        cx, sx = math.cos(tx), math.sin(tx)
+        cz, sz = math.cos(tz), math.sin(tz)
+        rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+        rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+        mat = rz @ rx
+        mats.append(mat)
+        verts_list.append(base_ring @ mat.T)
+        for i in range(ring_n):
+            edges.append((base_idx + i, base_idx + ((i + 1) % ring_n)))
+
+    v_arr = np.vstack(verts_list)
+    e_arr = np.asarray(edges, dtype=np.int32)
+    t_arr = np.asarray(tris, dtype=np.int32)
+    _STATIC_3D_CACHE["_atom_full"] = (v_arr, e_arr, t_arr)
+    _STATIC_3D_CACHE["_atom_mats"] = mats  # type: ignore[assignment]
+    return v_arr, e_arr, t_arr, mats
+
+
+def _atom_electrons(t: float, mats: list[np.ndarray]) -> np.ndarray:
+    ring_r = 0.72
+    pts = np.empty((6, 3), dtype=np.float64)
+    idx = 0
+    for ri, mat in enumerate(mats):
+        speed = 1.8 + ri * 0.25
+        for k in range(2):
+            ang_e = t * speed + k * math.pi + ri * 1.1
+            pts[idx] = np.array([math.cos(ang_e) * ring_r, math.sin(ang_e) * ring_r * 0.44, 0.0]) @ mat.T
+            idx += 1
+    return pts
+
+
+def _get_static_3d(kind: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    cached = _STATIC_3D_CACHE.get(kind)
+    if cached is not None:
+        return cached
 
     if kind == "sphere":
-        v, e, tris = _icosphere_mesh(0.72)
-        return v, e, tris, aura
-    if kind == "atom":
-        v, e, tris, electrons = _atom_mesh(t)
-        return v, e, tris, np.vstack([electrons, aura * 0.92])
-    if kind == "cube":
+        v, edges, tris = _icosphere_mesh(0.72)
+    elif kind == "cube":
         v = np.array([[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
                       [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]], dtype=np.float64) * 0.46
-        e = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+        edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
         tris = [(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
                 (2, 3, 7), (2, 7, 6), (1, 2, 6), (1, 6, 5), (0, 3, 7), (0, 7, 4)]
-        return v, e, tris, aura * 0.85
-    if kind == "octahedron":
+    elif kind == "octahedron":
         v = np.array([[0, -1, 0], [0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]], dtype=np.float64) * 0.70
-        e = [(0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (4, 3), (3, 5), (5, 2)]
+        edges = [(0, 2), (0, 3), (0, 4), (0, 5), (1, 2), (1, 3), (1, 4), (1, 5), (2, 4), (4, 3), (3, 5), (5, 2)]
         tris = [(1, 4, 2), (1, 2, 5), (1, 5, 3), (1, 3, 4), (0, 2, 4), (0, 5, 2), (0, 3, 5), (0, 4, 3)]
-        return v, e, tris, aura * 0.88
-    if kind == "pyramid":
+    elif kind == "pyramid":
         v = np.array([[0, 0.74, 0], [-0.56, -0.50, -0.56], [0.56, -0.50, -0.56],
                       [0.56, -0.50, 0.56], [-0.56, -0.50, 0.56]], dtype=np.float64)
-        e = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 3), (3, 4), (4, 1)]
+        edges = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 3), (3, 4), (4, 1)]
         tris = [(0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 1), (1, 2, 3), (1, 3, 4)]
-        return v, e, tris, aura * 0.86
-    if kind == "prism":
+    elif kind == "prism":
         a = np.linspace(0, 2 * math.pi, 6, endpoint=False)
         top = np.column_stack([np.cos(a) * 0.56, np.full(6, 0.42), np.sin(a) * 0.56])
         bot = np.column_stack([np.cos(a) * 0.56, np.full(6, -0.42), np.sin(a) * 0.56])
         v = np.vstack([top, bot])
-        e = [(i, (i + 1) % 6) for i in range(6)] + [(6 + i, 6 + (i + 1) % 6) for i in range(6)] + [(i, 6 + i) for i in range(6)]
+        edges = [(i, (i + 1) % 6) for i in range(6)] + [(6 + i, 6 + (i + 1) % 6) for i in range(6)] + [(i, 6 + i) for i in range(6)]
         tris = []
         for i in range(6):
             ni = (i + 1) % 6
@@ -388,8 +444,7 @@ def build_3d_mesh(kind: str, level: dict[str, Any], guide_inner: float, guide_ou
         for i in range(1, 5):
             tris.append((0, i, i + 1))
             tris.append((6, 6 + i, 6 + i + 1))
-        return v, e, tris, aura * 0.86
-    if kind == "torus":
+    else:  # torus
         maj, min_n = 12, 6
         R, r = 0.54, 0.20
         verts, edges, tris = [], [], []
@@ -405,7 +460,25 @@ def build_3d_mesh(kind: str, level: dict[str, Any], guide_inner: float, guide_ou
                 edges.append((cur, nu))
                 edges.append((cur, nw))
                 tris.extend([(cur, nu, nuw), (cur, nuw, nw)])
-        return np.asarray(verts, dtype=np.float64), edges, tris, aura * 0.90
+        v = np.asarray(verts, dtype=np.float64)
+
+    res = (
+        np.asarray(v, dtype=np.float64),
+        np.asarray(edges, dtype=np.int32).reshape(-1, 2),
+        np.asarray(tris, dtype=np.int32).reshape(-1, 3),
+    )
+    _STATIC_3D_CACHE[kind] = res
+    return res
+
+
+def _get_custom_spin_3d(level: dict[str, Any], guide_inner: float, guide_outer: float
+                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pts_key = tuple((round(float(p[0]), 4), round(float(p[1]), 4)) for p in (level.get("custom_points") or []))
+    key = (round(guide_inner, 4), round(guide_outer, 4), bool(level.get("closed", True)),
+           str(level.get("mode", "preset")), str(level.get("preset", "circle")), pts_key)
+    cached = _CUSTOM_3D_CACHE.get(key)
+    if cached is not None:
+        return cached
 
     half, closed = level_half_contour(level, guide_inner, guide_outer, n=14)
     left = np.column_stack([-half[-2:0:-1, 0], half[-2:0:-1, 1]])
@@ -420,7 +493,95 @@ def build_3d_mesh(kind: str, level: dict[str, Any], guide_inner: float, guide_ou
         ni = (i + 1) % m
         edges.extend([(i, ni), (m + i, m + ni), (i, m + i)])
         tris.extend([(i, ni, m + ni), (i, m + ni, m + i)])
-    return v, edges, tris, aura * 0.86
+    res = (
+        v,
+        np.asarray(edges, dtype=np.int32).reshape(-1, 2),
+        np.asarray(tris, dtype=np.int32).reshape(-1, 3),
+    )
+    if len(_CUSTOM_3D_CACHE) > 24:
+        _CUSTOM_3D_CACHE.clear()
+    _CUSTOM_3D_CACHE[key] = res
+    return res
+
+
+_AURA_SCALE = {
+    "sphere": 1.0,
+    "atom": 0.92,
+    "cube": 0.85,
+    "octahedron": 0.88,
+    "pyramid": 0.86,
+    "prism": 0.86,
+    "torus": 0.90,
+}
+
+
+def build_3d_mesh(kind: str, level: dict[str, Any], guide_inner: float, guide_outer: float, t: float = 0.0,
+                  include_aura: bool = True) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    aura = _BASE_AURA * _AURA_SCALE.get(kind, 0.86) if include_aura else np.empty((0, 3), dtype=np.float64)
+    if kind == "atom":
+        v, e, tris, mats = _atom_static_data()
+        electrons = _atom_electrons(t, mats)
+        extra = np.vstack([electrons, aura]) if include_aura else electrons
+        return v, e, tris, extra
+    if kind in ("sphere", "cube", "octahedron", "pyramid", "prism", "torus"):
+        v, e, tris = _get_static_3d(kind)
+        return v, e, tris, aura
+    v, e, tris = _get_custom_spin_3d(level, guide_inner, guide_outer)
+    return v, e, tris, aura
+
+
+def _pack_plexus_buffers(
+    vp: np.ndarray,
+    vd: np.ndarray,
+    vs: np.ndarray,
+    ap: np.ndarray,
+    ad: np.ndarray,
+    as_: np.ndarray,
+    edge_idx: np.ndarray,
+    tri_idx: np.ndarray,
+    is_atom: bool,
+    include_tris: bool,
+    include_aura: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n_main = len(vp)
+    n_aura = len(ap)
+    base_v = np.empty((n_main, 6), dtype=np.float32)
+    base_v[:, 0:2] = vp
+    base_v[:, 2] = vd
+    base_v[:, 3] = vs
+    base_v[:, 5] = 1.0
+
+    if include_tris and len(tri_idx):
+        base_v[:, 4] = 0.0
+        tri_buf = base_v[tri_idx.ravel()]
+    else:
+        tri_buf = np.empty((0, 6), dtype=np.float32)
+
+    if len(edge_idx):
+        base_v[:, 4] = 1.0
+        edge_buf = base_v[edge_idx.ravel()]
+    else:
+        edge_buf = np.empty((0, 6), dtype=np.float32)
+
+    node_buf = np.empty((n_main + n_aura, 6), dtype=np.float32)
+    node_buf[:n_main, 0:2] = vp
+    node_buf[:n_main, 2] = vd
+    node_buf[:n_main, 3] = vs
+    node_buf[:n_main, 4] = 2.0
+    node_buf[:n_main, 5] = 8.0 + vd * 8.0 + vs * 7.0
+
+    if n_aura:
+        node_buf[n_main:, 0:2] = ap
+        node_buf[n_main:, 2] = ad
+        node_buf[n_main:, 3] = as_
+        node_buf[n_main:, 4] = 2.0
+        sizes = 5.0 + ad * 5.0 + as_ * 4.0
+        if is_atom:
+            n_elec = min(6, n_aura)
+            sizes[:n_elec] = 13.0 + as_[:n_elec] * 7.0
+        node_buf[n_main:, 5] = sizes
+
+    return tri_buf, edge_buf, node_buf
 
 
 def project_3d_plexus(
@@ -432,9 +593,15 @@ def project_3d_plexus(
     spec_r: np.ndarray,
     scale: float,
     react: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Proyecta la malla 3D con reactividad estéreo en arrays de triángulos, líneas y nodos."""
-    v_raw, edges, tris, aura = build_3d_mesh(level.get("shape_3d", "sphere"), level, guide_inner, guide_outer, t)
+    include_tris: bool = True,
+    include_aura: bool = True,
+    echo_scale: float | None = None,
+    echo_react: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[tuple[np.ndarray, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    """Proyecta la malla 3D con reactividad estéreo (y eco opcional sin recalcular rotación)."""
+    kind = level.get("shape_3d", "sphere")
+    is_atom = kind == "atom"
+    v_raw, edge_idx, tri_idx, aura = build_3d_mesh(kind, level, guide_inner, guide_outer, t, include_aura=include_aura)
     ang = t * float(level.get("rot_speed", 0.7)) * float(level.get("rot_dir", 1))
     axis = level.get("rot_axis", "y")
 
@@ -451,10 +618,13 @@ def project_3d_plexus(
     rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
     rot = rz @ rx @ ry
 
-    def _transform(pts3: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _transform_base(pts3: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if pts3.size == 0:
+            z0 = np.empty((0, 2), dtype=np.float32)
+            z1 = np.empty(0, dtype=np.float32)
+            return z0, z1, z1
         rv = pts3 @ rot.T
-        z_cam = 2.6
-        persp = 1.9 / np.maximum(z_cam - rv[:, 2], 0.6)
+        persp = 1.9 / np.maximum(2.6 - rv[:, 2], 0.6)
         p2 = rv[:, :2] * persp[:, None]
         rad = np.hypot(p2[:, 0], p2[:, 1])
         max_r = float(np.max(rad)) if rad.size else 1.0
@@ -464,39 +634,24 @@ def project_3d_plexus(
         b_idx = np.clip((y_norm * 63.0).astype(int), 0, 63)
         side = np.clip((p2[:, 0] + 0.03) / 0.06, 0.0, 1.0)
         sp = spec_l[b_idx] * (1.0 - side) + spec_r[b_idx] * side
-        p2_audio = p2 * (1.0 + sp[:, None] * 0.14 * react) * scale
         depth = np.clip((rv[:, 2] + 0.85) / 1.7, 0.05, 1.0)
-        return p2_audio, depth, sp
+        return p2, depth, sp
 
-    vp, vd, vs = _transform(v_raw)
-    ap, ad, as_ = _transform(aura)
+    vp_base, vd, vs = _transform_base(v_raw)
+    ap_base, ad, as_ = _transform_base(aura)
 
-    tri_buf = np.empty((len(tris) * 3, 6), dtype=np.float32) if tris else np.empty((0, 6), dtype=np.float32)
-    for k, (a, b, c) in enumerate(tris):
-        for m, vi in enumerate((a, b, c)):
-            tri_buf[k * 3 + m] = [vp[vi, 0], vp[vi, 1], vd[vi], vs[vi], 0.0, 1.0]
+    vp = vp_base * (1.0 + vs[:, None] * 0.14 * react) * scale
+    ap = ap_base * (1.0 + as_[:, None] * 0.14 * react) * scale if len(ap_base) else ap_base
+    main_bufs = _pack_plexus_buffers(
+        vp, vd, vs, ap, ad, as_, edge_idx, tri_idx, is_atom, include_tris, include_aura
+    )
 
-    edge_buf = np.empty((len(edges) * 2, 6), dtype=np.float32) if edges else np.empty((0, 6), dtype=np.float32)
-    for k, (a, b) in enumerate(edges):
-        edge_buf[k * 2] = [vp[a, 0], vp[a, 1], vd[a], vs[a], 1.0, 1.0]
-        edge_buf[k * 2 + 1] = [vp[b, 0], vp[b, 1], vd[b], vs[b], 1.0, 1.0]
+    if echo_scale is not None and echo_react is not None:
+        vp_e = vp_base * (1.0 + vs[:, None] * 0.14 * echo_react) * echo_scale
+        ap_e = ap_base * (1.0 + as_[:, None] * 0.14 * echo_react) * echo_scale if len(ap_base) else ap_base
+        _, e_edge, e_node = _pack_plexus_buffers(
+            vp_e, vd, vs, ap_e, ad, as_, edge_idx, tri_idx, is_atom, False, include_aura
+        )
+        return main_bufs, (e_edge, e_node)
 
-    n_main, n_aura = len(vp), len(ap)
-    node_buf = np.empty((n_main + n_aura, 6), dtype=np.float32)
-    node_buf[:n_main, 0:2] = vp
-    node_buf[:n_main, 2] = vd
-    node_buf[:n_main, 3] = vs
-    node_buf[:n_main, 4] = 2.0
-    node_buf[:n_main, 5] = 8.0 + vd * 8.0 + vs * 7.0
-
-    is_atom = level.get("shape_3d") == "atom"
-    node_buf[n_main:, 0:2] = ap
-    node_buf[n_main:, 2] = ad
-    node_buf[n_main:, 3] = as_
-    node_buf[n_main:, 4] = 2.0
-    sizes = 5.0 + ad * 5.0 + as_ * 4.0
-    if is_atom and n_aura >= 6:
-        sizes[:6] = 13.0 + as_[:6] * 7.0
-    node_buf[n_main:, 5] = sizes
-
-    return tri_buf, edge_buf, node_buf
+    return main_bufs

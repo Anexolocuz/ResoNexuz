@@ -15,6 +15,14 @@ uniform float u_reactivity;
 uniform float u_density;
 uniform float u_guide_inner;
 uniform float u_guide_outer;
+uniform vec2  u_const_rot;      // (cos(rot), sin(rot)) precalculado en CPU
+uniform float u_const_scale;    // (14.0 * u_density) * (1.0 - bass * 0.08)
+
+// Controles de calidad en vivo
+uniform int   u_q_constellation; // 0 = apagada, 1 = solo puntos, 2 = completa
+uniform int   u_q_glow;          // 0 = líneas nítidas sin halos exp(), 1 = halos y resplandor
+uniform int   u_q_dither;        // 0 = sin ruido final, 1 = con dithering anti-bandas
+uniform int   u_q_echo;          // 0 = omitir ecos en calidad ultra baja, 1 = permitir ecos
 
 uniform float u_spectrum_l[64];
 uniform float u_spectrum_r[64];
@@ -35,7 +43,6 @@ uniform sampler2D u_sdf0;
 uniform sampler2D u_sdf1;
 uniform sampler2D u_sdf2;
 
-const float PI = 3.14159265;
 const float SDF_EXTENT = 1.25;
 
 vec3 hsv2rgb(vec3 c) {
@@ -77,18 +84,23 @@ float segment(vec2 p, vec2 a, vec2 b) {
     return smoothstep(0.035, 0.006, d) * smoothstep(1.3, 0.5, length(ba));
 }
 
-float segDist(vec2 p, vec2 a, vec2 b, out float nearestY) {
-    vec2 pa = p - a, ba = b - a;
-    float t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-5), 0.0, 1.0);
-    vec2 q = a + ba * t;
-    nearestY = q.y;
-    return length(p - q);
-}
-
-// Constelación interna
-vec2 constellation(vec2 p) {
+// Constelación interna: mode 1 = solo puntos, mode 2 = puntos + red de segmentos
+vec2 constellation(vec2 p, int mode) {
     vec2 gv = fract(p) - 0.5;
     vec2 id = floor(p);
+    if (mode == 1) {
+        float dots = 0.0;
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                vec2 cell = id + vec2(float(x), float(y));
+                vec2 pt = vec2(float(x), float(y)) + dotPos(cell);
+                float tw = 0.55 + 0.45 * sin(u_time * 2.0 + hashf(cell + 3.7) * 6.2831);
+                dots += smoothstep(0.075, 0.012, length(gv - pt)) * tw;
+            }
+        }
+        return vec2(dots, 0.0);
+    }
+
     vec2 pts[9];
     float tw[9];
     int k = 0;
@@ -132,7 +144,6 @@ vec3 pickColor(int role, vec3 col_base, vec3 col_opp1, vec3 col_opp2) {
 void main() {
     vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
     float r = length(uv);
-    float ang = abs(atan(uv.x, -uv.y)) / PI;
 
     float bass = mix(u_bass, 0.30 + 0.25 * sin(u_time * 0.9), u_idle);
     float calm = clamp(u_idle, 0.0, 1.0);
@@ -147,10 +158,12 @@ void main() {
     col_opp2 = mix(col_opp2, gray, calm);
 
     // Fondo Tokyo Night + resplandor sutil desplazado por el balance estéreo
-    vec2 stereo_center = vec2(u_balance * 0.14 * (1.0 - calm), 0.0);
-    float r_glow = length(uv - stereo_center);
     vec3 bg = vec3(0.035, 0.04, 0.065);
-    bg += col_base * exp(-r_glow * 3.8) * (0.10 + bass * 0.14);
+    if (u_q_glow != 0) {
+        vec2 stereo_center = vec2(u_balance * 0.14 * (1.0 - calm), 0.0);
+        float r_glow = length(uv - stereo_center);
+        bg += col_base * exp(-r_glow * 3.8) * (0.10 + bass * 0.14);
+    }
 
     // Evaluar cada nivel y calcular la máscara interior del dibujo más cercano al centro
     float inner_mask = 0.0;
@@ -174,15 +187,26 @@ void main() {
         float spec = 0.0;
         float closed_flag = 1.0;
         float disp = 0.0;
+        vec4 sdf = vec4(0.0);
 
         if (u_lvl_mode[lvl] == 0) {
-            vec4 sdf = evalSdf(lvl, uv, scale);
+            float max_disp = max(0.04, (u_guide_outer - 0.15) * scale * 0.65);
+            bool echo_active = (u_lvl_echo_on[lvl] != 0 && u_q_echo != 0);
+            float max_echo = echo_active
+                ? (u_lvl_echo_off[lvl] * u_ring_size + max_disp * u_lvl_echo_amp[lvl])
+                : max_disp;
+            float lvl_reach = scale * u_guide_outer + max(max_disp, max_echo) + (u_q_glow != 0 ? 0.38 : 0.05);
+            if (r > lvl_reach) {
+                if (!central_found) central_found = true;
+                continue;
+            }
+
+            sdf = evalSdf(lvl, uv, scale);
             float t_spec = sdf.g;
             closed_flag = sdf.a;
             spec = sampleStereoSpec(t_spec, uv.x);
             spec = mix(spec, 0.10 + 0.06 * sin(u_time * 1.3 + t_spec * 3.0), u_idle);
             // Desplazamiento paralelo acotado por la circunferencia exterior para evitar pellizcos
-            float max_disp = max(0.04, (u_guide_outer - 0.15) * scale * 0.65);
             disp = min(spec * 0.14 * u_ring_size * react, max_disp);
             d_base = (closed_flag > 0.5) ? abs(sdf.r - disp) : abs(sdf.r - disp * 0.6);
 
@@ -209,11 +233,10 @@ void main() {
             continue;
         }
 
-        // Eco propio de este nivel (2D SDF)
-        if (u_lvl_echo_on[lvl] != 0) {
-            vec4 sdf_e = evalSdf(lvl, uv, scale);
+        // Eco propio de este nivel (reutiliza sdf.r ya muestreado)
+        if (u_lvl_echo_on[lvl] != 0 && u_q_echo != 0) {
             float echo_disp = u_lvl_echo_off[lvl] * u_ring_size + disp * u_lvl_echo_amp[lvl];
-            float echo_d = abs(sdf_e.r - echo_disp);
+            float echo_d = abs(sdf.r - echo_disp);
             float echo_k;
             if (u_lvl_echo_peak[lvl] != 0) {
                 // Eco invisible en reposo/valles: solo aparece suavemente cerca del máximo de la onda
@@ -224,21 +247,26 @@ void main() {
             } else {
                 echo_k = (0.58 + 0.30 * spec + 0.35 * u_peak1) * (1.0 - 0.45 * calm);
             }
-            float echo_line = smoothstep(0.0032, 0.0005, echo_d) + exp(-echo_d * 42.0) * 0.26;
+            float echo_line = smoothstep(0.0032, 0.0005, echo_d);
+            if (u_q_glow != 0) {
+                echo_line += exp(-echo_d * 42.0) * 0.26;
+            }
             lines_accum += echo_c * echo_line * echo_k;
         }
 
         // Halo y núcleo de la línea del nivel
         float thick = (lvl == 0 ? 0.011 : 0.0055) + spec * 0.005 + u_peak1 * 0.003;
         float core = smoothstep(thick, 0.0012, d_base);
-        float halo_k = (lvl == 0) ? (0.55 + u_peak1 * 0.75) : (0.32 + u_peak2 * 0.45);
-        float halo = exp(-d_base * (22.0 - u_peak1 * 6.0)) * halo_k * (1.0 - 0.5 * calm);
+        if (u_q_glow != 0) {
+            float halo_k = (lvl == 0) ? (0.55 + u_peak1 * 0.75) : (0.32 + u_peak2 * 0.45);
+            float halo = exp(-d_base * (22.0 - u_peak1 * 6.0)) * halo_k * (1.0 - 0.5 * calm);
+            vec3 halo_col = mix(base_c, col_opp2, u_peak2);
+            lines_accum += halo_col * halo;
+        }
 
         float crest = clamp(u_peak1 * (0.35 + 0.9 * spec), 0.0, 1.0);
         vec3 line_col = (lvl == 0) ? mix(base_c, col_opp1, crest) : base_c;
-        vec3 halo_col = mix(base_c, col_opp2, u_peak2);
 
-        lines_accum += halo_col * halo;
         float w_core = core * (lvl == 0 ? 1.0 : 0.78);
         core_col = mix(core_col, mix(line_col, vec3(1.0), (0.45 + 0.25 * u_peak1) * (1.0 - 0.8 * calm)), w_core);
         core_alpha = max(core_alpha, w_core);
@@ -246,11 +274,10 @@ void main() {
 
     // Constelación interna confinada únicamente al dibujo más cercano al centro
     vec3 inner = vec3(0.0);
-    if (inner_mask > 0.0) {
-        float rot = u_time * 0.12 + bass * 0.25;
-        mat2 m = mat2(cos(rot), -sin(rot), sin(rot), cos(rot));
-        vec2 p = (m * uv) * (14.0 * u_density) * (1.0 - bass * 0.08);
-        vec2 c = constellation(p);
+    if (u_q_constellation != 0 && inner_mask > 0.001) {
+        mat2 m = mat2(u_const_rot.x, -u_const_rot.y, u_const_rot.y, u_const_rot.x);
+        vec2 p = (m * uv) * u_const_scale;
+        vec2 c = constellation(p, u_q_constellation);
         float edge_fade = smoothstep(0.0, 0.08, inner_mask);
         vec3 dot_col = mix(col_base, col_opp2, clamp(u_peak2 * 1.25, 0.0, 1.0));
         vec3 line_col = mix(col_base, col_opp2, clamp(u_peak2, 0.0, 1.0));
@@ -260,14 +287,19 @@ void main() {
     }
 
     // Onda de choque desde el nivel central
-    float shock_d = abs(central_sd - (central_disp + 0.02 + u_peak1 * 0.07));
-    float shock = smoothstep(0.008, 0.001, shock_d) * u_peak1 * 0.75;
+    float shock = 0.0;
+    if (u_q_glow != 0 && u_peak1 > 0.01) {
+        float shock_d = abs(central_sd - (central_disp + 0.02 + u_peak1 * 0.07));
+        shock = smoothstep(0.008, 0.001, shock_d) * u_peak1 * 0.75;
+    }
 
     vec3 color = bg + inner + lines_accum + col_opp1 * shock;
     color = mix(color, core_col, core_alpha);
 
     // Viñeta suave y ruido mínimo para evitar bandas
     color *= 1.0 - 0.35 * smoothstep(0.55, 1.1, r);
-    color += (hashf(gl_FragCoord.xy + fract(u_time)) - 0.5) / 255.0;
+    if (u_q_dither != 0) {
+        color += (hashf(gl_FragCoord.xy + fract(u_time)) - 0.5) / 255.0;
+    }
     fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }

@@ -108,6 +108,19 @@
         <strong style="font-size:14px">Audio, estéreo, colores y fondo</strong>
         <div class="grid2" style="margin-top:12px" id="globalGrid"></div>
       </div>
+
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <strong style="font-size:14px">Calidad y rendimiento</strong>
+          <span class="nota" id="qualityBadge" style="margin:0"></span>
+        </div>
+        <div class="tabs" style="margin-top:10px" id="qualityTabs"></div>
+        <div class="grid2" id="qualityGrid"></div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px" id="qualityChecks"></div>
+        <div class="nota">
+          Bajar la escala de resolución (0.55×–0.75×) y dejar la constelación en «Solo puntos» o «Apagada» reduce mucho el trabajo de GPU sin cambiar tus formas.
+        </div>
+      </div>
     </section>
   </div>
 </main>
@@ -124,6 +137,16 @@ const S3D_NOMBRES = {
   cube: "Cubo", pyramid: "Pirámide", prism: "Prisma hex.",
   torus: "Toroide", custom_spin: "Tu dibujo 3D"
 };
+const QUALITY_NOMBRES = {
+  ultra: "Máxima",
+  high: "Alta",
+  medium: "Equilibrada",
+  low: "Ligera",
+  ultra_low: "Ultra ahorro",
+  custom: "Personalizada"
+};
+const MESH_3D_CACHE = new Map();
+let lastPreviewMs = 0;
 
 let state = null;
 let activeLvl = 0;
@@ -427,8 +450,88 @@ function renderGlobalControls() {
   $("#selHarmony").onchange = e => { state.config.color.harmony = e.target.value; };
 }
 
-function mesh3DPreview(kind, t) {
-  let verts = [], edges = [], tris = [], extra = [];
+function renderQualityControls() {
+  const q = state.config.quality || {
+    preset: "high", render_scale: 1.0, constellation: "full",
+    glow: true, dither: true, echo_detail: true, plexus_facets: true, plexus_aura: true,
+    max_fps: 60, idle_fps: 15
+  };
+  state.config.quality = q;
+  const presets = state.quality_presets || {};
+  const presetOrder = ["ultra", "high", "medium", "low", "ultra_low"];
+
+  $("#qualityBadge").textContent = "Modo actual: " + (QUALITY_NOMBRES[q.preset] || q.preset);
+  $("#qualityTabs").innerHTML = presetOrder.map(k =>
+    `<button class="tab ${q.preset === k ? "activo" : ""}" data-qpreset="${k}">${QUALITY_NOMBRES[k] || k}</button>`
+  ).join("");
+
+  const fpsOpts = [0, 24, 30, 45, 60, 90, 120, 144];
+  const fpsVal = fpsOpts.includes(q.max_fps) ? q.max_fps : 60;
+  $("#qualityGrid").innerHTML = `
+    <div class="ctrl"><label>Escala de resolución <b id="qv-render_scale">${Math.round(q.render_scale * 100)}%</b></label>
+      <input type="range" id="qRenderScale" min="0.40" max="1.00" step="0.05" value="${q.render_scale}">
+    </div>
+    <div class="ctrl"><label>Constelación interior</label>
+      <select id="qConstellation">
+        <option value="full" ${q.constellation === "full" ? "selected" : ""}>Completa (puntos + red)</option>
+        <option value="dots" ${q.constellation === "dots" ? "selected" : ""}>Solo puntos (rápida)</option>
+        <option value="off" ${q.constellation === "off" ? "selected" : ""}>Apagada</option>
+      </select>
+    </div>
+    <div class="ctrl"><label>Límite de FPS activos</label>
+      <select id="qMaxFps">
+        ${fpsOpts.map(v => `<option value="${v}" ${fpsVal === v ? "selected" : ""}>${v === 0 ? "Sin límite (VSync)" : v + " FPS"}</option>`).join("")}
+      </select>
+    </div>
+    <div class="ctrl"><label>FPS en reposo (sin audio) <b id="qv-idle_fps">${q.idle_fps}</b></label>
+      <input type="range" id="qIdleFps" min="2" max="60" step="1" value="${q.idle_fps}">
+    </div>`;
+
+  const checks = [
+    ["glow", "Brillo y halos suaves"],
+    ["echo_detail", "Ecos en crestas"],
+    ["plexus_facets", "Facetas 3D translúcidas"],
+    ["plexus_aura", "Partículas aura 3D"],
+    ["dither", "Suavizado anti-bandas (dither)"],
+  ];
+  $("#qualityChecks").innerHTML = checks.map(([k, lbl]) =>
+    `<label class="chk"><input type="checkbox" data-qchk="${k}" ${q[k] ? "checked" : ""}> ${lbl}</label>`
+  ).join("");
+
+  const markCustom = () => {
+    q.preset = "custom";
+    $("#qualityBadge").textContent = "Modo actual: " + QUALITY_NOMBRES.custom;
+    $("#qualityTabs").querySelectorAll("[data-qpreset]").forEach(b => b.classList.remove("activo"));
+  };
+
+  $("#qualityTabs").querySelectorAll("[data-qpreset]").forEach(btn => {
+    btn.onclick = () => {
+      const k = btn.dataset.qpreset;
+      if (presets[k]) Object.assign(q, presets[k]);
+      q.preset = k;
+      renderQualityControls();
+    };
+  });
+  $("#qRenderScale").oninput = e => {
+    q.render_scale = +e.target.value;
+    $("#qv-render_scale").textContent = Math.round(q.render_scale * 100) + "%";
+    markCustom();
+  };
+  $("#qConstellation").onchange = e => { q.constellation = e.target.value; markCustom(); };
+  $("#qMaxFps").onchange = e => { q.max_fps = +e.target.value; markCustom(); };
+  $("#qIdleFps").oninput = e => {
+    q.idle_fps = +e.target.value;
+    $("#qv-idle_fps").textContent = q.idle_fps;
+    markCustom();
+  };
+  $("#qualityChecks").querySelectorAll("[data-qchk]").forEach(inp => {
+    inp.onchange = () => { q[inp.dataset.qchk] = inp.checked; markCustom(); };
+  });
+}
+
+function getStaticMesh3DPreview(kind) {
+  if (MESH_3D_CACHE.has(kind)) return MESH_3D_CACHE.get(kind);
+  let verts = [], edges = [], tris = [];
   if (kind === "sphere") {
     const phi = (1 + Math.sqrt(5)) / 2;
     const raw = [[-1,phi,0],[1,phi,0],[-1,-phi,0],[1,-phi,0],[0,-1,phi],[0,1,phi],[0,-1,-phi],[0,1,-phi],[phi,0,-1],[phi,0,1],[-phi,0,-1],[-phi,0,1]]
@@ -454,12 +557,11 @@ function mesh3DPreview(kind, t) {
     verts = [[0,-.16,0],[0,.16,0],[.16,0,0],[-.16,0,0],[0,0,.16],[0,0,-.16]];
     edges = [[0,2],[0,3],[0,4],[0,5],[1,2],[1,3],[1,4],[1,5],[2,4],[4,3],[3,5],[5,2]];
     tris = [[1,4,2],[1,2,5],[1,5,3],[1,3,4],[0,2,4],[0,5,2],[0,3,5],[0,4,3]];
-    [0, Math.PI / 3, -Math.PI / 3].forEach((tz, ri) => {
+    [0, Math.PI / 3, -Math.PI / 3].forEach(tz => {
       const base = verts.length, rn = 22, r = 0.72, tx = 0.35;
       const cx = Math.cos(tx), sx = Math.sin(tx), cz = Math.cos(tz), sz = Math.sin(tz);
       const rotP = (px, py) => [px * cz - py * cx * sz, px * sz + py * cx * cz, py * sx];
       for (let i = 0; i < rn; i++) { const a = i * Math.PI * 2 / rn; verts.push(rotP(Math.cos(a) * r, Math.sin(a) * r * 0.44)); edges.push([base + i, base + ((i + 1) % rn)]); }
-      for (let k = 0; k < 2; k++) { const ae = t * (1.8 + ri * 0.25) + k * Math.PI + ri * 1.1; extra.push(rotP(Math.cos(ae) * r, Math.sin(ae) * r * 0.44)); }
     });
   } else if (kind === "cube") {
     for (const z of [-.46, .46]) for (const y of [-.46, .46]) for (const x of [-.46, .46]) verts.push([x, y, z]);
@@ -483,7 +585,24 @@ function mesh3DPreview(kind, t) {
     edges = [[0,2],[0,3],[0,4],[0,5],[1,2],[1,3],[1,4],[1,5],[2,4],[4,3],[3,5],[5,2]];
     tris = [[1,4,2],[1,2,5],[1,5,3],[1,3,4],[0,2,4],[0,5,2],[0,3,5],[0,4,3]];
   }
-  return { verts, edges, tris, extra };
+  const res = { verts, edges, tris };
+  MESH_3D_CACHE.set(kind, res);
+  return res;
+}
+
+function mesh3DPreview(kind, t) {
+  const base = getStaticMesh3DPreview(kind);
+  if (kind !== "atom") return { ...base, extra: [] };
+  const extra = [];
+  [0, Math.PI / 3, -Math.PI / 3].forEach((tz, ri) => {
+    const r = 0.72, tx = 0.35, cx = Math.cos(tx), sx = Math.sin(tx), cz = Math.cos(tz), sz = Math.sin(tz);
+    for (let k = 0; k < 2; k++) {
+      const ae = t * (1.8 + ri * 0.25) + k * Math.PI + ri * 1.1;
+      const px = Math.cos(ae) * r, py = Math.sin(ae) * r * 0.44;
+      extra.push([px * cz - py * cx * sz, px * sz + py * cx * cz, py * sx]);
+    }
+  });
+  return { ...base, extra };
 }
 
 function project3DPreview(lvl, t) {
@@ -501,6 +620,14 @@ function project3DPreview(lvl, t) {
 
 function tickPreview(ms) {
   if (state) {
+    const q = state.config.quality || {};
+    const prevFps = q.max_fps && q.max_fps > 0 ? Math.min(60, q.max_fps) : 60;
+    if (ms - lastPreviewMs < (1000 / prevFps) * 0.9) {
+      requestAnimationFrame(tickPreview);
+      return;
+    }
+    lastPreviewMs = ms;
+
     const cv = $("#previewCanvas"), ctx = cv.getContext("2d"), W = cv.width, H = cv.height, cx = W / 2, cy = H / 2, t = ms * 0.001;
     ctx.fillStyle = "#090b10"; ctx.fillRect(0, 0, W, H);
     const stereoDemo = $("#chkDemoStereo").checked ? state.config.audio.stereo_separation : 0;
@@ -508,10 +635,13 @@ function tickPreview(ms) {
     const colors = { base: "#7aa2f7", opp1: "#f7768e", opp2: "#2ac3de" };
     const gi = state.shapes.guide_inner, go = state.shapes.guide_outer;
 
-    ctx.fillStyle = "rgba(122,162,247,0.45)";
-    for (let i = 0; i < 14; i++) {
-      const a = t * 0.4 + i * 2.3, rr = (0.04 + (i % 5) * 0.032) * H * state.config.visual.ring_size;
-      ctx.beginPath(); ctx.arc(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, 1.6, 0, Math.PI * 2); ctx.fill();
+    if (q.constellation !== "off") {
+      ctx.fillStyle = "rgba(122,162,247,0.45)";
+      const nDots = q.constellation === "dots" ? 8 : 14;
+      for (let i = 0; i < nDots; i++) {
+        const a = t * 0.4 + i * 2.3, rr = (0.04 + (i % 5) * 0.032) * H * state.config.visual.ring_size;
+        ctx.beginPath(); ctx.arc(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, 1.6, 0, Math.PI * 2); ctx.fill();
+      }
     }
 
     state.shapes.levels.forEach((lvl, li) => {
@@ -523,12 +653,14 @@ function tickPreview(ms) {
         if (lvl.mode === "3d") {
           const { pv, pe, edges, tris } = project3DPreview(lvl, t);
           const mapPt = p => { const g = p[0] < 0 ? lGain : rGain, k = sc * mult * (1 + g * 0.08); return [cx + p[0] * k, cy - p[1] * k, p[2]]; };
-          ctx.fillStyle = strokeCol;
-          tris.forEach(([a, b, c]) => {
-            const pa = mapPt(pv[a]), pb = mapPt(pv[b]), pc = mapPt(pv[c]);
-            ctx.globalAlpha = alpha * (0.04 + 0.07 * Math.max(0, (pa[2] + pb[2] + pc[2]) / 3));
-            ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.lineTo(pc[0], pc[1]); ctx.closePath(); ctx.fill();
-          });
+          if (q.plexus_facets !== false) {
+            ctx.fillStyle = strokeCol;
+            tris.forEach(([a, b, c]) => {
+              const pa = mapPt(pv[a]), pb = mapPt(pv[b]), pc = mapPt(pv[c]);
+              ctx.globalAlpha = alpha * (0.04 + 0.07 * Math.max(0, (pa[2] + pb[2] + pc[2]) / 3));
+              ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.lineTo(pc[0], pc[1]); ctx.closePath(); ctx.fill();
+            });
+          }
           ctx.strokeStyle = strokeCol; ctx.globalAlpha = alpha * 0.65;
           ctx.beginPath(); edges.forEach(([a, b]) => { const pa = mapPt(pv[a]), pb = mapPt(pv[b]); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); }); ctx.stroke();
           if (mult === 1.0) {
@@ -552,7 +684,7 @@ function tickPreview(ms) {
         ctx.globalAlpha = 1;
       };
 
-      if (lvl.echo_enabled) {
+      if (lvl.echo_enabled && q.echo_detail !== false) {
         const waveMax = Math.max(lGain, rGain), thr = lvl.echo_threshold ?? 0.62;
         const vis = (lvl.echo_peak_only !== false) ? Math.max(0, Math.min(1, (waveMax - (thr - 0.15)) / 0.2)) : 0.72;
         if (vis > 0.02) drawContour(1 + lvl.echo_offset * 3.0, echoCol, 1.4, vis);
@@ -566,7 +698,7 @@ function tickPreview(ms) {
 async function init() {
   try {
     state = await (await fetch("/api/state", { cache: "no-store" })).json();
-    renderTabs(); renderLevelPanel(); renderGlobalControls();
+    renderTabs(); renderLevelPanel(); renderGlobalControls(); renderQualityControls();
     requestAnimationFrame(tickPreview);
   } catch (e) { setMsg("✗ Error cargando configuración: " + e.message, "mal"); }
 }

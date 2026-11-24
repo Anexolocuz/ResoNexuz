@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .config import PKG_DIR, default_config_path, load_config, serialize_toml
+from .config import PKG_DIR, QUALITY_PRESETS, default_config_path, load_config, serialize_toml, validate_quality
 from .shapes import PRESETS_2D, SHAPES_3D, default_shapes_path, load_shapes
 
 WEB_HTML = PKG_DIR / "web" / "index.html"
@@ -107,6 +107,10 @@ def _validate_config(raw: dict[str, Any], base_cfg: dict[str, dict[str, Any]]) -
             cfg["wallpaper"]["fps"] = max(15, min(165, int(w.get("fps", cfg["wallpaper"]["fps"]))))
         except (TypeError, ValueError):
             pass
+
+    q = raw.get("quality") or {}
+    if isinstance(q, dict):
+        cfg["quality"] = validate_quality(q, cfg["quality"])
     return cfg
 
 
@@ -116,6 +120,7 @@ def build_state(cfg_path: Path, shapes_path: Path) -> dict[str, Any]:
         "shapes": load_shapes(shapes_path),
         "presets": list(PRESETS_2D),
         "shapes_3d": list(SHAPES_3D),
+        "quality_presets": QUALITY_PRESETS,
     }
 
 

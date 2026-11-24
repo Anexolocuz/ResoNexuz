@@ -11,12 +11,13 @@ import moderngl
 import numpy as np
 
 from .audio_engine import Frame
-from .config import PKG_DIR
+from .config import DEFAULTS, PKG_DIR
 from .shapes import SDF_SIZE, build_level_sdf, load_shapes, project_3d_plexus
 
 HARMONY = {"split_complementary": 150.0 / 360.0, "triadic": 120.0 / 360.0}
 COLOR_ROLE = {"base": 0, "opp1": 1, "opp2": 2}
 MODE_ID = {"preset": 0, "custom": 0, "3d": 1}
+CONSTELLATION_MODE = {"off": 0, "dots": 1, "full": 2}
 
 
 def _hsv_rgb(h: float, s: float, v: float) -> tuple[float, float, float]:
@@ -47,6 +48,15 @@ class Renderer:
             [(self.p3d_vbo, "2f 1f 1f 1f 1f", "in_pos", "in_depth", "in_spec", "in_kind", "in_size")],
         )
 
+        self.blit_prog = ctx.program(
+            vertex_shader=(shaders / "ncs_ring.vert").read_text(encoding="utf-8"),
+            fragment_shader=(shaders / "blit.frag").read_text(encoding="utf-8"),
+        )
+        self.blit_vao = ctx.vertex_array(self.blit_prog, [])
+        self._scale_tex: moderngl.Texture | None = None
+        self._scale_fbo: moderngl.Framebuffer | None = None
+        self._scale_size = (0, 0)
+
         zero_sdf = np.zeros((SDF_SIZE, SDF_SIZE, 4), dtype=np.float32).tobytes()
         self.sdf_textures: list[moderngl.Texture] = []
         for idx in range(3):
@@ -60,7 +70,12 @@ class Renderer:
 
         self.ring_size = 1.0
         self.reactivity = 1.0
+        self.density = 1.0
         self.harmony = HARMONY["split_complementary"]
+        self.render_scale = 1.0
+        self.q_echo = True
+        self.q_plexus_facets = True
+        self.q_plexus_aura = True
         self.shapes_cfg: dict = {}
         self.update_config(cfg)
         self.update_shapes(shapes_cfg or load_shapes())
@@ -71,13 +86,24 @@ class Renderer:
 
     def update_config(self, cfg: dict) -> None:
         vis = cfg["visual"]
+        q = cfg.get("quality", DEFAULTS["quality"])
         self.harmony = HARMONY.get(str(cfg["color"]["harmony"]), HARMONY["split_complementary"])
         self.ring_size = float(vis["ring_size"])
         self.reactivity = float(vis["ring_reactivity"])
+        self.density = float(vis["particle_density"])
+        self.render_scale = max(0.35, min(1.0, float(q.get("render_scale", 1.0))))
+        self.q_echo = bool(q.get("echo_detail", True))
+        self.q_plexus_facets = bool(q.get("plexus_facets", True))
+        self.q_plexus_aura = bool(q.get("plexus_aura", True))
+
         self._set("u_harmony", self.harmony)
         self._set("u_ring_size", self.ring_size)
         self._set("u_reactivity", self.reactivity)
-        self._set("u_density", float(vis["particle_density"]))
+        self._set("u_density", self.density)
+        self._set("u_q_constellation", CONSTELLATION_MODE.get(str(q.get("constellation", "full")), 2))
+        self._set("u_q_glow", 1 if q.get("glow", True) else 0)
+        self._set("u_q_dither", 1 if q.get("dither", True) else 0)
+        self._set("u_q_echo", 1 if self.q_echo else 0)
 
     def update_shapes(self, shapes_cfg: dict) -> None:
         self.shapes_cfg = shapes_cfg
@@ -163,11 +189,12 @@ class Renderer:
             base_c = palette.get(str(lvl.get("color_role", "base")), col_base)
             echo_c = col_opp2 if lvl.get("color_role") == "opp1" else col_opp1
 
-            tri_buf, edge_buf, node_buf = project_3d_plexus(
-                lvl, t, gi, go, f.spectrum_l, f.spectrum_r, scale, react
-            )
-
-            if lvl.get("echo_enabled", False):
+            tri_buf, edge_buf, node_buf = ((), (), ())  # type: ignore[assignment]
+            echo_bufs: tuple[np.ndarray, np.ndarray] | None = None
+            echo_alpha = 0.0
+            exp_s = scale
+            echo_react = react
+            if self.q_echo and lvl.get("echo_enabled", False):
                 crest = min(1.0, float(max(f.spectrum.max(), d.peak_primary, d.peak_secondary)))
                 if lvl.get("echo_peak_only", True):
                     thr = float(lvl.get("echo_threshold", 0.62))
@@ -178,11 +205,24 @@ class Renderer:
                     echo_alpha = (0.45 + 0.30 * crest) * (1.0 - 0.45 * calm)
                 if echo_alpha > 0.02:
                     exp_s = scale * (1.0 + float(lvl.get("echo_offset", 0.03)) * 2.2 + d.peak_primary * 0.12)
-                    _, e_edge, e_node = project_3d_plexus(
-                        lvl, t, gi, go, f.spectrum_l, f.spectrum_r, exp_s, react * float(lvl.get("echo_amp", 1.4))
-                    )
-                    self._draw_plexus_batch(e_edge, moderngl.LINES, echo_c, base_c, echo_alpha)
-                    self._draw_plexus_batch(e_node, moderngl.POINTS, echo_c, base_c, echo_alpha * 0.9)
+                    echo_react = react * float(lvl.get("echo_amp", 1.4))
+
+            if echo_alpha > 0.02:
+                (tri_buf, edge_buf, node_buf), echo_bufs = project_3d_plexus(
+                    lvl, t, gi, go, f.spectrum_l, f.spectrum_r, scale, react,
+                    include_tris=self.q_plexus_facets, include_aura=self.q_plexus_aura,
+                    echo_scale=exp_s, echo_react=echo_react,
+                )
+            else:
+                tri_buf, edge_buf, node_buf = project_3d_plexus(
+                    lvl, t, gi, go, f.spectrum_l, f.spectrum_r, scale, react,
+                    include_tris=self.q_plexus_facets, include_aura=self.q_plexus_aura,
+                )
+
+            if echo_bufs is not None:
+                e_edge, e_node = echo_bufs
+                self._draw_plexus_batch(e_edge, moderngl.LINES, echo_c, base_c, echo_alpha)
+                self._draw_plexus_batch(e_node, moderngl.POINTS, echo_c, base_c, echo_alpha * 0.9)
 
             alpha_main = 1.0 - 0.45 * calm
             self._draw_plexus_batch(tri_buf, moderngl.TRIANGLES, base_c, col_opp2, alpha_main)
@@ -191,14 +231,32 @@ class Renderer:
 
         self.ctx.disable(moderngl.BLEND | moderngl.PROGRAM_POINT_SIZE)
 
+    def _ensure_scale_fbo(self, sw: int, sh: int) -> moderngl.Framebuffer:
+        if self._scale_fbo is not None and self._scale_size == (sw, sh):
+            return self._scale_fbo
+        if self._scale_fbo is not None:
+            self._scale_fbo.release()
+        if self._scale_tex is not None:
+            self._scale_tex.release()
+        tex = self.ctx.texture((sw, sh), 4)
+        tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        tex.repeat_x = False
+        tex.repeat_y = False
+        self._scale_tex = tex
+        self._scale_fbo = self.ctx.framebuffer(color_attachments=[tex])
+        self._scale_size = (sw, sh)
+        return self._scale_fbo
+
     def draw(self, f: Frame, w: int, h: int, t: float) -> None:
         d = f.dyn
+        calm = max(0.0, min(1.0, float(f.idle)))
+        bass = d.bass_env * (1.0 - calm) + (0.30 + 0.25 * math.sin(t * 0.9)) * calm
+        rot = t * 0.12 + bass * 0.25
+
         for idx, tex in enumerate(self.sdf_textures):
             tex.use(location=idx)
 
         self.ctx.disable(moderngl.BLEND)
-        self.ctx.viewport = (0, 0, w, h)
-        self._set("u_resolution", (float(w), float(h)))
         self._set("u_time", float(t))
         self._set("u_base_hue", float(d.base_hue))
         self._set("u_peak1", float(d.peak_primary))
@@ -206,17 +264,47 @@ class Renderer:
         self._set("u_bass", float(d.bass_env))
         self._set("u_idle", float(f.idle))
         self._set("u_balance", float(f.stereo_balance))
+        self._set("u_const_rot", (math.cos(rot), math.sin(rot)))
+        self._set("u_const_scale", (14.0 * self.density) * (1.0 - bass * 0.08))
         if "u_spectrum_l" in self.prog:
-            self.prog["u_spectrum_l"].write(f.spectrum_l.astype("f4").tobytes())
+            self.prog["u_spectrum_l"].write(f.spectrum_l.astype("f4", copy=False).tobytes())
         if "u_spectrum_r" in self.prog:
-            self.prog["u_spectrum_r"].write(f.spectrum_r.astype("f4").tobytes())
-        self.vao.render(moderngl.TRIANGLES, vertices=3)
+            self.prog["u_spectrum_r"].write(f.spectrum_r.astype("f4", copy=False).tobytes())
+
+        use_scaled = self.render_scale < 0.999 and w >= 64 and h >= 64
+        if use_scaled:
+            target_fbo = self.ctx.fbo
+            sw = max(64, int(round(w * self.render_scale)))
+            sh = max(64, int(round(h * self.render_scale)))
+            scale_fbo = self._ensure_scale_fbo(sw, sh)
+            scale_fbo.use()
+            self.ctx.viewport = (0, 0, sw, sh)
+            self._set("u_resolution", (float(sw), float(sh)))
+            self.vao.render(moderngl.TRIANGLES, vertices=3)
+
+            target_fbo.use()
+            self.ctx.viewport = (0, 0, w, h)
+            assert self._scale_tex is not None
+            self._scale_tex.use(location=3)
+            self.blit_prog["u_tex"].value = 3
+            self.blit_prog["u_resolution"].value = (float(w), float(h))
+            self.blit_vao.render(moderngl.TRIANGLES, vertices=3)
+        else:
+            self.ctx.viewport = (0, 0, w, h)
+            self._set("u_resolution", (float(w), float(h)))
+            self.vao.render(moderngl.TRIANGLES, vertices=3)
 
         self._draw_3d_levels(f, w, h, t)
 
     def release(self) -> None:
         for tex in self.sdf_textures:
             tex.release()
+        if self._scale_fbo is not None:
+            self._scale_fbo.release()
+        if self._scale_tex is not None:
+            self._scale_tex.release()
+        self.blit_vao.release()
+        self.blit_prog.release()
         self.vao.release()
         self.prog.release()
         self.p3d_vao.release()

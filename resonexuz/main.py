@@ -111,6 +111,18 @@ def _send_window_to_bottom_windows(window) -> None:
         pass
 
 
+def _target_fps(cfg: dict, wallpaper_win: bool, idle: float) -> int:
+    q = cfg.get("quality", {})
+    idle_fps = int(q.get("idle_fps", 15))
+    max_fps = int(q.get("max_fps", 60))
+    if idle > 0.92 and idle_fps > 0:
+        return idle_fps
+    if wallpaper_win:
+        wp_fps = max(10, int(cfg.get("wallpaper", {}).get("fps", 60)))
+        return min(wp_fps, max_fps) if max_fps > 0 else wp_fps
+    return max_fps
+
+
 def run_window(engine: AudioEngine, cfg: dict, cfg_path: Path, shapes_path: Path,
                args: argparse.Namespace, stop: list[bool]) -> int:
     import glfw
@@ -246,6 +258,15 @@ def run_window(engine: AudioEngine, cfg: dict, cfg_path: Path, shapes_path: Path
                 glfw.swap_buffers(window)
                 if diag:
                     diag.update(f, engine)
+                tfps = _target_fps(cfg, wallpaper_win, f.idle)
+                if tfps > 0:
+                    wait_s = (1.0 / tfps) - (time.monotonic() - now)
+                    if args.seconds:
+                        wait_s = min(wait_s, max(0.0, start + args.seconds - time.monotonic()))
+                    if wait_s > 0.001:
+                        time.sleep(wait_s)
+            else:
+                time.sleep(0.05)
     finally:
         renderer.release()
         glfw.destroy_window(window)

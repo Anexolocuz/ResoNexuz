@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "resonexuz"
-version = "1.0.0"
+version = "1.1.0"
 description = "Visualizador de audio estéreo en OpenGL con formas simétricas híbridas, ecos en crestas y mallas 3D estilo plexus"
 readme = "README.md"
 license = {text = "MIT"}
